@@ -42,8 +42,8 @@ std::unique_ptr<Object> argwc::readObject() {
     cursor++;
 
     // READ INFO
-    bool is_required = (file_data[cursor] & (1 << 0)) == 1;
-    bool is_ordered = (file_data[cursor] & (1 << 1)) == 1;
+    bool is_required = (file_data[cursor] & (1 << 0)) != 0;
+    bool is_ordered = (file_data[cursor] & (1 << 1)) != 0;
     cursor++;
 
     // READ NAME
@@ -74,9 +74,6 @@ std::unique_ptr<Object> argwc::readObject() {
             block->children.push_back(readObject());
         }
     }
-    if (block)
-        block->is_ordered = is_ordered;
-
     // CONSTRUCT AND RETURN NODE
     std::unique_ptr<Object> node;
     switch (type) {
@@ -85,6 +82,9 @@ std::unique_ptr<Object> argwc::readObject() {
                                      std::to_string(cursor));
             break;
         case uint8_t(1):
+            if (!block)
+                block = std::make_unique<Object_Block>();
+            block->is_ordered = is_ordered;
             node = std::move(block);
             break;
         case uint8_t(2):
@@ -100,7 +100,7 @@ std::unique_ptr<Object> argwc::readObject() {
             break;
     }
 
-    return std::move(node);
+    return node;
 }
 void argwc::read_config() {
     while (cursor < file_data.size()) {
@@ -113,12 +113,19 @@ void argwc::read_arguments() {
         provided_args.insert(std::string(argv[i]));
     }
 
-    // we'll build active object list starting from top-level Objects, when a flag
-    // with an if_passed block is present in rhe args, its block children become active too
+    // Build active object list from top-level objects. Nested scope blocks are
+    // expanded so args declared under ordered/unordered blocks participate.
+    // When a block is ordered, its Object_Arg children keep definition order.
     std::vector<Object*> active_objs;
     active_objs.reserve(entry_point->children.size());
     for (auto& obj : entry_point->children) {
-        active_objs.push_back(obj.get());
+        if (auto* blk = dynamic_cast<Object_Block*>(obj.get())) {
+            for (auto& child : blk->children) {
+                active_objs.push_back(child.get());
+            }
+        } else {
+            active_objs.push_back(obj.get());
+        }
     }
 
     std::unordered_set<std::string> activated_flags;
@@ -143,11 +150,11 @@ void argwc::read_arguments() {
     // collect all known flag texts so we can separate positional args
     std::unordered_set<std::string> all_flag_texts;
     std::unordered_set<std::string> all_val_prefixes;
-    for (auto& obj : entry_point->children) {
-        if (auto flg = dynamic_cast<Object_Flag*>(obj.get())) {
+    for (auto* obj : active_objs) {
+        if (auto flg = dynamic_cast<Object_Flag*>(obj)) {
             all_flag_texts.insert(flg->flag_text);
         }
-        if (auto val = dynamic_cast<Object_Val*>(obj.get())) {
+        if (auto val = dynamic_cast<Object_Val*>(obj)) {
             all_val_prefixes.insert(val->prefix_text);
         }
     }
